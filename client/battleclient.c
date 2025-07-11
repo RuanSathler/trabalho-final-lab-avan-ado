@@ -18,7 +18,13 @@ void imprimir_tabuleiro(char tab[BOARD_SIZE][BOARD_SIZE]) {
     }
 }
 
-int main() {
+int main(int argc, char const *argv[]) {
+    if (argc != 2) {
+        printf("Uso: %s <IP do Servidor>\n", argv[0]);
+        return 1;
+    }
+    const char *server_ip = argv[1];
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in serv_addr;
     char buffer[MAX_MSG] = {0};
@@ -34,7 +40,10 @@ int main() {
     serv_addr.sin_port = htons(PORT);
 
     // Converte o endereço IP de string para formato binário
-    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
+    if (inet_pton(AF_INET, server_ip, &serv_addr.sin_addr) <= 0) {
+        printf("\nEndereco de IP invalido ou nao suportado \n");
+        return 1;
+    }
 
     // Tenta conectar ao servidor
     if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
@@ -73,9 +82,9 @@ int main() {
     printf("\n--- FASE DE POSICIONAMENTO ---\n");
     printf("Posicione seus navios no tabuleiro %dx%d\n", BOARD_SIZE, BOARD_SIZE);
     printf("Voce deve posicionar: 1 SUBMARINO (S), 2 FRAGATAS (F), 1 DESTROYER (D)\n");
-    printf("Use formato: %s <TIPO/LETRA> <X> <Y> <O>\n", CMD_POS);
-    printf("X e Y sao indices de 0 a %d (ex: A1 = 0 0, H8 = 7 7), O e orientacao H (Horizontal) ou V (Vertical)\n", BOARD_SIZE - 1);
-    printf("Exemplo: %s F 2 3 H (para uma Fragata) ou %s SUBMARINO 2 3 H\n", CMD_POS, CMD_POS);
+    printf("Use formato: %s <TIPO/LETRA> <Coordenada> <O>\n", CMD_POS);
+    printf("Coordenada e no formato LetraNumero (ex: A1, H8). O e orientacao H (Horizontal) ou V (Vertical)\n");
+    printf("Exemplo: %s F A1 H (para uma Fragata) ou %s SUBMARINO C4 V\n", CMD_POS, CMD_POS);
 
     int pos_submarino = 0; // Contadores locais para o cliente
     int pos_fragata = 0;
@@ -130,17 +139,18 @@ int main() {
         // Verifica se o comando é POS (posicionar navio)
         else if (strncmp(buffer, CMD_POS, strlen(CMD_POS)) == 0) {
             char tipo_str[20];
-            int x_coord, y_coord;
+            char row_char_in;
+            int col_num_in;
             char orientation_char;
             
-            // Tentativa de parsear o comando POS
-            if (sscanf(buffer, CMD_POS " %s %d %d %c", tipo_str, &x_coord, &y_coord, &orientation_char) == 4) {
-                // Normaliza a orientação para maiúscula
+            // Tentativa de parsear o comando POS no formato "POS TIPO A1 O"
+            if (sscanf(buffer, CMD_POS " %s %c%d %c", tipo_str, &row_char_in, &col_num_in, &orientation_char) == 4) {
+                row_char_in = toupper(row_char_in);
                 orientation_char = toupper(orientation_char);
 
                 // Validações locais (básicas)
-                if (x_coord < 0 || x_coord >= BOARD_SIZE || y_coord < 0 || y_coord >= BOARD_SIZE) {
-                    printf("Coordenadas invalidas. X e Y devem ser entre 0 e %d.\n", BOARD_SIZE - 1);
+                if (row_char_in < 'A' || row_char_in > ('A' + BOARD_SIZE - 1) || col_num_in < 1 || col_num_in > BOARD_SIZE) {
+                    printf("Coordenada invalida. Use Letra (A-%c) e Numero (1-%d).\n", 'A' + BOARD_SIZE - 1, BOARD_SIZE);
                     continue;
                 }
                 if (orientation_char != 'H' && orientation_char != 'V') {
@@ -148,8 +158,16 @@ int main() {
                     continue;
                 }
 
+                // Traduz para o formato do servidor (0-indexed)
+                int x_coord_0_indexed = row_char_in - 'A';
+                int y_coord_0_indexed = col_num_in - 1;
+
+                // Monta o comando para o servidor
+                char server_cmd[MAX_MSG];
+                snprintf(server_cmd, sizeof(server_cmd), "%s %s %d %d %c", CMD_POS, tipo_str, x_coord_0_indexed, y_coord_0_indexed, orientation_char);
+                
                 // Envia para o servidor para validação completa e posicionamento
-                send(sock, buffer, strlen(buffer), 0);
+                send(sock, server_cmd, strlen(server_cmd), 0);
 
                 // Espera a resposta do servidor
                 n = recv(sock, buffer, sizeof(buffer)-1, 0);
@@ -175,17 +193,17 @@ int main() {
                         simb = 'D'; ship_len = 3; pos_destroyer++;
                     }
 
-                    // Marca o navio no tabuleiro do cliente
+                    // Marca o navio no tabuleiro do cliente usando as coordenadas 0-indexed
                     if (orientation_char == 'H') {
                         for (int i = 0; i < ship_len; i++)
-                            if (y_coord + i < BOARD_SIZE) meu_tab[x_coord][y_coord + i] = simb;
+                            if (y_coord_0_indexed + i < BOARD_SIZE) meu_tab[x_coord_0_indexed][y_coord_0_indexed + i] = simb;
                     } else { // 'V'
                         for (int i = 0; i < ship_len; i++)
-                            if (x_coord + i < BOARD_SIZE) meu_tab[x_coord + i][y_coord] = simb;
+                            if (x_coord_0_indexed + i < BOARD_SIZE) meu_tab[x_coord_0_indexed + i][y_coord_0_indexed] = simb;
                     }
                 }
             } else {
-                printf("Comando POS invalido. Formato esperado: POS <TIPO/LETRA> <X> <Y> <O>\n");
+                printf("Comando POS invalido. Formato esperado: POS <TIPO/LETRA> <Coordenada> <O> (ex: POS F A1 H)\n");
             }
         }
         // Se o comando não é POS nem READY
@@ -250,21 +268,39 @@ int main() {
                 imprimir_tabuleiro(meu_tab);
                 printf("\nTabuleiro do Adversario (seus tiros):\n");
                 imprimir_tabuleiro(tab_adversario);
-                printf("Digite %s <x> <y> (0-%d para X e Y):\n", CMD_FIRE, BOARD_SIZE - 1);
+                printf("Digite %s <Coordenada> (ex: A1):\n", CMD_FIRE);
 
-                char fire_cmd[MAX_MSG];
+                char fire_cmd_input[MAX_MSG];
                 while(1) {
-                    fgets(fire_cmd, sizeof(fire_cmd), stdin);
-                    fire_cmd[strcspn(fire_cmd, "\n")] = 0;
-                    if (sscanf(fire_cmd, CMD_FIRE " %d %d", &last_fire_x, &last_fire_y) == 2) {
-                        if (last_fire_x >= 0 && last_fire_x < BOARD_SIZE && last_fire_y >= 0 && last_fire_y < BOARD_SIZE) {
-                            send(sock, fire_cmd, strlen(fire_cmd), 0);
-                            break;
-                        } else {
-                            printf("Coordenadas de tiro invalidas. Use 0-%d. Tente novamente.\n", BOARD_SIZE - 1);
+                    fgets(fire_cmd_input, sizeof(fire_cmd_input), stdin);
+                    fire_cmd_input[strcspn(fire_cmd_input, "\n")] = 0;
+
+                    char row_char_in;
+                    int col_num_in;
+                    if (sscanf(fire_cmd_input, CMD_FIRE " %c%d", &row_char_in, &col_num_in) == 2) {
+                        row_char_in = toupper(row_char_in);
+
+                        if (row_char_in < 'A' || row_char_in > ('A' + BOARD_SIZE - 1) || col_num_in < 1 || col_num_in > BOARD_SIZE) {
+                            printf("Coordenada invalida. Use Letra (A-%c) e Numero (1-%d).\n", 'A' + BOARD_SIZE - 1, BOARD_SIZE);
+                            continue;
                         }
+                        
+                        // Traduz para o formato do servidor (0-indexed)
+                        int x_coord_0_indexed = row_char_in - 'A';
+                        int y_coord_0_indexed = col_num_in - 1;
+
+                        // Guarda as coordenadas do tiro para atualizar o tabuleiro do adversário depois
+                        last_fire_x = x_coord_0_indexed;
+                        last_fire_y = y_coord_0_indexed;
+
+                        // Monta o comando para o servidor
+                        char server_cmd[MAX_MSG];
+                        snprintf(server_cmd, sizeof(server_cmd), "%s %d %d", CMD_FIRE, x_coord_0_indexed, y_coord_0_indexed);
+                        
+                        send(sock, server_cmd, strlen(server_cmd), 0);
+                        break; // Sai do loop de leitura de FIRE
                     } else {
-                        printf("Comando FIRE invalido. Formato: %s <X> <Y>. Tente novamente.\n", CMD_FIRE);
+                        printf("Comando FIRE invalido. Formato: %s <Coordenada> (ex: A1). Tente novamente.\n", CMD_FIRE);
                     }
                 }
             }
