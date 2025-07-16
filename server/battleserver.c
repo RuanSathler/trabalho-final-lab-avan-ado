@@ -46,9 +46,14 @@ ShipType ship_types[] = {
 // Variáveis globais do servidor
 Player players[MAX_PLAYERS];
 int num_connected_players = 0;
+// =================== INÍCIO: REGIÃO DE PARALELISMO ===================
+// Declaração do mutex global para proteger o array de jogadores e variáveis globais
 pthread_mutex_t players_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Condição para sincronizar quando ambos os jogadores estão prontos
 pthread_cond_t all_players_ready_cond = PTHREAD_COND_INITIALIZER;
+// Condição para sincronizar a vez de cada jogador
 pthread_cond_t turn_cond = PTHREAD_COND_INITIALIZER; // Para sincronizar os turnos
+// =================== FIM: REGIÃO DE PARALELISMO ===================
 int current_player_turn = -1; // -1 = nenhum, 0 = player 0, 1 = player 1
 int game_started = 0; // Flag para indicar se o jogo começou
 int game_over = 0; // Flag para indicar se o jogo terminou
@@ -279,6 +284,7 @@ void handle_fire_command(Player *attacker, char* command) {
         return;
     }
     
+    // =================== INÍCIO: REGIÃO CRÍTICA INDIVIDUAL (defensor) ===================
     pthread_mutex_lock(&defender->lock); // Proteger o tabuleiro do defensor
 
     // Evita atirar na mesma posição já atingida (X) ou errada (O)
@@ -353,17 +359,20 @@ void handle_fire_command(Player *attacker, char* command) {
     send_to_player(defender->socket, msg_to_defender); // Notificação ao defensor
 
     pthread_mutex_unlock(&defender->lock); // Liberar o lock do tabuleiro do defensor
+    // =================== FIM: REGIÃO CRÍTICA INDIVIDUAL ===================
 
     // Troca o turno, se o jogo não terminou
-    pthread_mutex_lock(&players_mutex);
+    pthread_mutex_lock(&players_mutex); // =================== INÍCIO: REGIÃO CRÍTICA GLOBAL ===================
     if (!game_over) {
         current_player_turn = target_player_id;
         send_to_player(attacker->socket, "AGUARDE");
         send_to_player(defender->socket, CMD_PLAY);
         printf("DEBUG: Turno trocado para Jogador %s.\n", players[current_player_turn].name);
+        // =================== INÍCIO: SINCRONIZAÇÃO ENTRE THREADS (troca de turno) ===================
         pthread_cond_broadcast(&turn_cond); // Notifica as threads que o turno mudou
+        // =================== FIM: SINCRONIZAÇÃO ENTRE THREADS ===================
     }
-    pthread_mutex_unlock(&players_mutex);
+    pthread_mutex_unlock(&players_mutex); // =================== FIM: REGIÃO CRÍTICA GLOBAL ===================
 }
 
 // Thread para lidar com a comunicação de cada cliente
@@ -443,7 +452,9 @@ void *handle_client(void *arg) {
     // Esperar que o outro jogador também esteja pronto
     pthread_mutex_lock(&players_mutex);
     while (!game_started) {
+         // =================== INÍCIO: SINCRONIZAÇÃO ENTRE THREADS (ambos prontos) ===================
         pthread_cond_wait(&all_players_ready_cond, &players_mutex);
+        // =================== FIM: SINCRONIZAÇÃO ENTRE THREADS ===================
         // Verifica novamente se o jogo terminou enquanto esperava (ex: outro jogador desconectou)
         if (game_over) {
             pthread_mutex_unlock(&players_mutex);
@@ -464,17 +475,17 @@ void *handle_client(void *arg) {
 
     // --- Fase de Jogo Principal ---
     while (!game_over) {
-        pthread_mutex_lock(&players_mutex);
-        // A thread espera aqui até que seja a sua vez de jogar
+        pthread_mutex_lock(&players_mutex); // =================== INÍCIO: REGIÃO CRÍTICA GLOBAL ===================
+        // =================== INÍCIO: SINCRONIZAÇÃO ENTRE THREADS (turno) ===================
         while (current_player_turn != player->id && !game_over) {
             pthread_cond_wait(&turn_cond, &players_mutex);
         }
-
+        // =================== FIM: SINCRONIZAÇÃO ENTRE THREADS ===================
         if (game_over) {
-            pthread_mutex_unlock(&players_mutex);
-            break; // Sai do loop se o jogo acabou enquanto esperava
+            pthread_mutex_unlock(&players_mutex); // =================== FIM: REGIÃO CRÍTICA GLOBAL ===================
+            break;
         }
-        pthread_mutex_unlock(&players_mutex);
+        pthread_mutex_unlock(&players_mutex); // =================== FIM: REGIÃO CRÍTICA GLOBAL ===================
 
         // Agora é a vez deste jogador, então ele espera por um comando
         n = recv(player->socket, buffer, sizeof(buffer)-1, 0);
@@ -510,7 +521,7 @@ void *handle_client(void *arg) {
         close(player->socket);
     }
     printf("DEBUG: Cliente %s desconectou e thread encerrada.\n", player->name);
-    pthread_exit(NULL);
+    pthread_exit(NULL); // Encerrar a thread corretamente
 }
 
 int main() {
@@ -525,7 +536,10 @@ int main() {
         init_player_state(&players[i]); // Usa a nova função de inicialização
         players[i].id = i;
         players[i].socket = 0; // 0 significa socket nao conectado/inicializado
+        // =================== INÍCIO: REGIÃO DE PARALELISMO ===================
+        // Cada jogador possui seu próprio mutex para proteger seu estado individual
         pthread_mutex_init(&players[i].lock, NULL); // Inicializa o mutex para cada jogador
+        // =================== FIM: REGIÃO DE PARALELISMO ===================
     }
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -564,15 +578,16 @@ int main() {
             continue;
         }
 
-        pthread_mutex_lock(&players_mutex);
+        // =================== INÍCIO: REGIÃO CRÍTICA GLOBAL ===================
+        pthread_mutex_lock(&players_mutex); 
         if (num_connected_players < MAX_PLAYERS) {
             player_idx = num_connected_players; // Pega o próximo slot disponível
             players[player_idx].socket = new_socket;
-            
-            // Cria a thread para o novo cliente. A thread cuidará do comando JOIN e do resto.
+            // =================== INÍCIO: REGIÃO DE PARALELISMO ===================
+            // Cria uma thread para cada jogador conectado. Cada thread executa a função handle_client.
             pthread_create(&tid[player_idx], NULL, handle_client, (void *)&players[player_idx]);
             pthread_detach(tid[player_idx]); // Desatacha a thread para não precisar de pthread_join
-            
+            // =================== FIM: REGIÃO DE PARALELISMO ===================
             num_connected_players++;
             printf("DEBUG: Nova conexao aceita. Slot %d. Total conectado: %d\n", player_idx, num_connected_players);
             
@@ -581,7 +596,7 @@ int main() {
             close(new_socket);
             printf("DEBUG: Conexao rejeitada: Jogo cheio (socket %d).\n", new_socket);
         }
-        pthread_mutex_unlock(&players_mutex);
+        pthread_mutex_unlock(&players_mutex); // =================== FIM: REGIÃO CRÍTICA GLOBAL ===================
     }
 
     // Este loop nunca será alcançado em um servidor infinito.
