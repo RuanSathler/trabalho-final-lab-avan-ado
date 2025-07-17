@@ -291,6 +291,15 @@ void handle_fire_command(Player *attacker, char* command) {
     if (defender->board[x][y] == 'X' || defender->board[x][y] == 'O') {
         send_to_player(attacker->socket, "Voce ja atirou nesta posicao. Tente outra.");
         pthread_mutex_unlock(&defender->lock);
+        // Troca o turno mesmo em caso de tiro repetido
+        pthread_mutex_lock(&players_mutex);
+        if (!game_over) {
+            current_player_turn = target_player_id;
+            send_to_player(attacker->socket, "AGUARDE");
+            send_to_player(defender->socket, CMD_PLAY);
+            pthread_cond_broadcast(&turn_cond);
+        }
+        pthread_mutex_unlock(&players_mutex);
         return;
     }
 
@@ -555,7 +564,7 @@ int main() {
 
     printf("Servidor de Batalha Naval iniciado na porta %d...\n", PORT);
 
-    while (1) { // Loop infinito para aceitar conexões (agora mais robusto)
+    while (1) { // Loop infinito para aceitar conexões 
         // Reinicia o estado do jogo se ele terminou
         if (game_over) {
             printf("DEBUG: Jogo anterior terminou. Resetando estado do servidor.\n");
@@ -596,7 +605,8 @@ int main() {
             close(new_socket);
             printf("DEBUG: Conexao rejeitada: Jogo cheio (socket %d).\n", new_socket);
         }
-        pthread_mutex_unlock(&players_mutex); // =================== FIM: REGIÃO CRÍTICA GLOBAL ===================
+        pthread_mutex_unlock(&players_mutex); 
+        // =================== FIM: REGIÃO CRÍTICA GLOBAL ===================
     }
 
     // Este loop nunca será alcançado em um servidor infinito.
