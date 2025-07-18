@@ -107,7 +107,7 @@ int main(int argc, char const *argv[]) {
             if (pos_submarino == 1 && pos_fragata == 2 && pos_destroyer == 1) {
                 send(sock, buffer, strlen(buffer), 0); // Envia o comando READY
 
-                printf("Servidor: READY recebido. Aguardando adversario...\n"); // Feedback imediato ao usuário
+                //printf("Servidor: READY recebido. Aguardando adversario...\n"); // Feedback imediato ao usuário
 
                 // Loop para esperar mensagens do servidor após READY
                 while (1) {
